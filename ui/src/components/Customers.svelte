@@ -1,18 +1,20 @@
-<script>
+<script lang="ts">
   import { onMount } from 'svelte';
+  import type { CellValueChangedEvent, ColDef, ICellRendererParams } from 'ag-grid-community';
   import Grid from './Grid.svelte';
-  import { call } from '../lib/api.js';
-  import { notify, ask, inr } from '../lib/ui.js';
+  import { call } from '../lib/api';
+  import { notify, ask, inr } from '../lib/ui';
+  import type { Customer, CustomerInput } from '../lib/types';
 
-  let rows = [];
-  let selected = [];
+  let rows: Customer[] = [];
+  let selected: Customer[] = [];
   let search = '';
   let showForm = false;
-  let form = blank();
+  let form: CustomerInput = blank();
 
   $: ids = selected.map((r) => r.id);
 
-  const columns = [
+  const columns: ColDef<Customer>[] = [
     { field: 'name', headerName: 'Name', editable: true, flex: 1.3, minWidth: 160 },
     { field: 'phone', headerName: 'Phone', editable: true, width: 150 },
     {
@@ -23,26 +25,26 @@
     { field: 'upi_ids', headerName: 'UPI ids (comma separated)', editable: true, flex: 2, minWidth: 220 },
     { field: 'active', headerName: 'Active', editable: true, width: 100, cellDataType: 'boolean' },
     {
-      headerName: 'Status', width: 120, valueGetter: (p) => (p.data.active ? 'Active' : 'Inactive'),
-      cellRenderer: (p) => `<span class="badge ${p.value === 'Active' ? 'paid' : 'off'}">${p.value}</span>`
+      headerName: 'Status', width: 120, valueGetter: (p) => (p.data?.active ? 'Active' : 'Inactive'),
+      cellRenderer: (p: ICellRendererParams<Customer, string>) => `<span class="badge ${p.value === 'Active' ? 'paid' : 'off'}">${p.value}</span>`
     }
   ];
 
-  function blank() {
+  function blank(): CustomerInput {
     return { id: null, name: '', phone: '', monthly_fee: 0, upi_ids: '', active: true };
   }
 
   async function load() {
-    try { rows = await call('list_customers'); } catch (e) { notify(e.message, 'error'); }
+    try { rows = await call('list_customers'); } catch (e) { notify((e as Error).message, 'error'); }
   }
   onMount(load);
 
-  async function onCellChange(e) {
+  async function onCellChange(e: CustomEvent<CellValueChangedEvent<Customer>>) {
     try {
       await call('save_customer', { ...e.detail.data });
       notify('Saved', 'success', 1500);
     } catch (err) {
-      notify(err.message, 'error');
+      notify((err as Error).message, 'error');
     }
     await load(); // refresh (also reverts a rejected edit)
   }
@@ -55,15 +57,15 @@
       showForm = false;
       notify('Customer added', 'success');
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 
-  async function setActive(active) {
+  async function setActive(active: boolean) {
     try {
       const r = await call('set_customers_active', ids, active);
       notify(`${r.updated} customer(s) ${active ? 'activated' : 'deactivated'}`, 'success');
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 
   async function remove() {
@@ -74,7 +76,7 @@
       if (r.skipped.length)
         notify(`Not deleted (they have invoices — deactivate instead): ${r.skipped.join(', ')}`, 'error', 8000);
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 </script>
 

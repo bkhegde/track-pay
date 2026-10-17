@@ -1,17 +1,19 @@
-<script>
+<script lang="ts">
   import { onMount } from 'svelte';
+  import type { CellValueChangedEvent, ColDef, ICellRendererParams } from 'ag-grid-community';
   import Grid from './Grid.svelte';
-  import { call } from '../lib/api.js';
-  import { notify, ask, inr, currentMonth } from '../lib/ui.js';
+  import { call } from '../lib/api';
+  import { notify, ask, inr, currentMonth } from '../lib/ui';
+  import type { Invoice } from '../lib/types';
 
   let month = currentMonth();
   let unpaidOnly = false;
-  let rows = [];
-  let selected = [];
+  let rows: Invoice[] = [];
+  let selected: Invoice[] = [];
   let search = '';
-  let bulkAmount = '';
+  let bulkAmount: number | null = null; // number inputs bind to null when empty
   let showPay = false;
-  let pay = { amount: '', date: '' };
+  let pay: { amount: number | null; date: string } = { amount: null, date: '' };
 
   $: ids = selected.map((r) => r.id);
   $: totals = {
@@ -19,19 +21,19 @@
     paid: rows.filter((r) => r.status === 'PAID').reduce((s, r) => s + (r.paid_amount ?? 0), 0)
   };
 
-  const columns = [
+  const columns: ColDef<Invoice>[] = [
     { field: 'customer_name', headerName: 'Customer', flex: 1.3, minWidth: 160 },
     { field: 'phone', headerName: 'Phone', width: 130 },
     { field: 'month', headerName: 'Month', width: 105 },
     {
       field: 'amount', headerName: 'Invoice amount', width: 150, type: 'rightAligned',
-      editable: (p) => p.data.status === 'UNPAID',
+      editable: (p) => p.data?.status === 'UNPAID',
       cellEditor: 'agNumberCellEditor', cellEditorParams: { min: 0 },
       valueFormatter: (p) => inr(p.value), valueParser: (p) => Number(p.newValue)
     },
     {
       field: 'status', headerName: 'Status', width: 110,
-      cellRenderer: (p) => `<span class="badge ${p.value === 'PAID' ? 'paid' : 'unpaid'}">${p.value === 'PAID' ? 'Paid' : 'Unpaid'}</span>`
+      cellRenderer: (p: ICellRendererParams<Invoice, Invoice['status']>) => `<span class="badge ${p.value === 'PAID' ? 'paid' : 'unpaid'}">${p.value === 'PAID' ? 'Paid' : 'Unpaid'}</span>`
     },
     {
       field: 'paid_amount', headerName: 'Paid amount', width: 140, type: 'rightAligned', editable: true,
@@ -50,7 +52,7 @@
   async function load() {
     try {
       rows = await call('list_invoices', month, unpaidOnly ? 'UNPAID' : 'ALL');
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
   onMount(load);
   $: month, unpaidOnly, load();
@@ -60,15 +62,16 @@
       const r = await call('generate_invoices', month);
       notify(`${r.created} invoice(s) created, ${r.existing} already existed for ${month}`, 'success');
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 
-  async function onCellChange(e) {
+  async function onCellChange(e: CustomEvent<CellValueChangedEvent<Invoice>>) {
     const { colDef, data } = e.detail;
     try {
+      if (!data) return;
       if (colDef.field === 'amount') await call('update_invoice_amounts', [data.id], data.amount);
       else await call('update_payment', data.id, data.paid_amount ?? null, data.paid_date || null);
-    } catch (err) { notify(err.message, 'error'); }
+    } catch (err) { notify((err as Error).message, 'error'); }
     await load();
   }
 
@@ -77,7 +80,7 @@
       const r = await call('update_invoice_amounts', ids, bulkAmount);
       notify(`${r.updated} unpaid invoice(s) updated (paid invoices are left unchanged)`, 'success');
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 
   async function applyToMonth() {
@@ -86,18 +89,18 @@
       const r = await call('update_month_amounts', month, bulkAmount);
       notify(`${r.updated} invoice(s) updated`, 'success');
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 
-  function openPay() { pay = { amount: '', date: '' }; showPay = true; }
+  function openPay() { pay = { amount: null, date: '' }; showPay = true; }
 
   async function markPaid() {
     try {
-      const r = await call('mark_paid', ids, pay.amount === '' ? null : pay.amount, pay.date || null);
+      const r = await call('mark_paid', ids, pay.amount ?? null, pay.date || null);
       showPay = false;
       notify(`${r.updated} invoice(s) marked as paid`, 'success');
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 
   async function markUnpaid() {
@@ -105,7 +108,7 @@
     try {
       await call('mark_unpaid', ids);
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 </script>
 
@@ -121,8 +124,8 @@
 
   <div class="toolbar">
     <input type="number" min="0" step="0.01" placeholder="New amount" style="width:130px" bind:value={bulkAmount} />
-    <button class="btn" disabled={!ids.length || bulkAmount === ''} on:click={applyToSelected}>Set amount for selected</button>
-    <button class="btn" disabled={bulkAmount === ''} on:click={applyToMonth}>Set amount for all unpaid in month</button>
+    <button class="btn" disabled={!ids.length || bulkAmount == null} on:click={applyToSelected}>Set amount for selected</button>
+    <button class="btn" disabled={bulkAmount == null} on:click={applyToMonth}>Set amount for all unpaid in month</button>
     <span class="sep"></span>
     <button class="btn" disabled={!ids.length} on:click={openPay}>Mark selected as paid</button>
     <button class="btn" disabled={!ids.length} on:click={markUnpaid}>Mark selected as unpaid</button>

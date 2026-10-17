@@ -15,9 +15,9 @@ def main():
     if dev:
         url = "http://localhost:5173"
     else:
-        index = BASE / "frontend" / "dist" / "index.html"
+        index = BASE / "ui" / "dist" / "index.html"
         if not index.exists():
-            sys.exit("The UI is not built yet. Run:  cd frontend && npm install && npm run build")
+            sys.exit("The UI is not built yet. Run:  cd ui && npm install && npm run build")
         url = str(index)
 
     webview.create_window("Track-Pay", url, js_api=Api(), width=1380, height=880,

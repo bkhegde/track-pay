@@ -1,27 +1,29 @@
-<script>
+<script lang="ts">
   import { onMount } from 'svelte';
+  import type { ColDef } from 'ag-grid-community';
   import Grid from './Grid.svelte';
-  import { call } from '../lib/api.js';
-  import { notify, inr, currentMonth } from '../lib/ui.js';
+  import { call } from '../lib/api';
+  import { notify, inr } from '../lib/ui';
+  import type { BankEntry, Invoice, ReconcileResult } from '../lib/types';
 
   let autoMonth = '';           // empty = all months
-  let result = null;
-  let invoices = [];
-  let entries = [];
-  let invSel = null;
-  let entrySel = null;
+  let result: ReconcileResult | null = null;
+  let invoices: Invoice[] = [];
+  let entries: BankEntry[] = [];
+  let invSel: Invoice | null = null;
+  let entrySel: BankEntry | null = null;
   let invSearch = '';
   let bankSearch = '';
   let suggest = true;
   let running = false;
 
-  const invCols = [
+  const invCols: ColDef<Invoice>[] = [
     { field: 'customer_name', headerName: 'Customer', flex: 1.2, minWidth: 130 },
     { field: 'month', headerName: 'Month', width: 100 },
     { field: 'amount', headerName: 'Amount', width: 115, type: 'rightAligned', valueFormatter: (p) => inr(p.value) },
     { field: 'upi_ids', headerName: 'UPI ids', flex: 1.2, minWidth: 140 }
   ];
-  const bankCols = [
+  const bankCols: ColDef<BankEntry>[] = [
     { field: 'txn_date', headerName: 'Date', width: 105, sort: 'desc' },
     { field: 'description', headerName: 'Narration', flex: 2, minWidth: 200, tooltipField: 'description' },
     { field: 'credit', headerName: 'Credit', width: 115, type: 'rightAligned', valueFormatter: (p) => inr(p.value) }
@@ -35,7 +37,7 @@
       ]);
       invSel = null;
       entrySel = null;
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
   onMount(load);
 
@@ -45,10 +47,10 @@
       result = await call('auto_reconcile', autoMonth || null);
       notify(`${result.matched} payment(s) matched automatically`, result.matched ? 'success' : 'info');
       await load();
-    } catch (e) { notify(e.message, 'error'); } finally { running = false; }
+    } catch (e) { notify((e as Error).message, 'error'); } finally { running = false; }
   }
 
-  function onInvoiceSelect(e) {
+  function onInvoiceSelect(e: CustomEvent<Invoice[]>) {
     invSel = e.detail[0] || null;
     if (suggest && invSel) {
       const first = (invSel.upi_ids || '').split(',')[0].trim();
@@ -56,14 +58,15 @@
     }
   }
 
-  $: amountMismatch = invSel && entrySel && Math.abs(invSel.amount - entrySel.credit) > 0.005;
+  $: amountMismatch = !!invSel && !!entrySel && Math.abs(invSel.amount - entrySel.credit) > 0.005;
 
   async function match() {
+    if (!invSel || !entrySel) return;
     try {
       await call('manual_match', invSel.id, entrySel.id);
       notify('Payment matched and invoice marked as paid', 'success');
       await load();
-    } catch (e) { notify(e.message, 'error'); }
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 </script>
 

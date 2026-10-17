@@ -1,17 +1,19 @@
-<script>
+<script lang="ts">
   import { onMount } from 'svelte';
+  import type { ColDef } from 'ag-grid-community';
   import Grid from './Grid.svelte';
-  import { call } from '../lib/api.js';
-  import { notify, inr } from '../lib/ui.js';
+  import { call } from '../lib/api';
+  import { notify, inr } from '../lib/ui';
+  import type { BankEntry, BankView, ImportResult } from '../lib/types';
 
-  let rows = [];
-  let view = 'ALL';
+  let rows: BankEntry[] = [];
+  let view: BankView = 'ALL';
   let search = '';
-  let lastImport = null;
+  let lastImport: ImportResult | null = null;
   let busy = false;
-  let fileInput;
+  let fileInput: HTMLInputElement;
 
-  const columns = [
+  const columns: ColDef<BankEntry>[] = [
     { field: 'txn_date', headerName: 'Date', width: 115, sort: 'desc' },
     { field: 'description', headerName: 'Narration', flex: 3, minWidth: 260, tooltipField: 'description' },
     { field: 'txn_ref', headerName: 'Reference', width: 160 },
@@ -22,13 +24,13 @@
   ];
 
   async function load() {
-    try { rows = await call('list_bank_entries', view); } catch (e) { notify(e.message, 'error'); }
+    try { rows = await call('list_bank_entries', view); } catch (e) { notify((e as Error).message, 'error'); }
   }
   onMount(load);
   $: view, load();
 
-  async function onFile(e) {
-    const file = e.target.files[0];
+  async function onFile(e: Event) {
+    const file = (e.currentTarget as HTMLInputElement).files?.[0];
     if (!file) return;
     busy = true;
     try {
@@ -37,7 +39,7 @@
       notify(`${lastImport.inserted} new entries imported, ${lastImport.duplicates} already present`, 'success');
       await load();
     } catch (err) {
-      notify(err.message, 'error', 8000);
+      notify((err as Error).message, 'error', 8000);
     } finally {
       busy = false;
       fileInput.value = '';

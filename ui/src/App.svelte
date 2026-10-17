@@ -1,20 +1,22 @@
-<script>
+<script lang="ts">
   import Customers from './components/Customers.svelte';
   import Invoices from './components/Invoices.svelte';
   import BankStatement from './components/BankStatement.svelte';
   import Reconcile from './components/Reconcile.svelte';
-  import { toasts, confirmState } from './lib/ui.js';
+  import { toasts, confirmState } from './lib/ui';
 
-  const tabs = [
+  type TabId = 'customers' | 'invoices' | 'bank' | 'reconcile';
+
+  const tabs: { id: TabId; label: string }[] = [
     { id: 'customers', label: 'Customers' },
     { id: 'invoices', label: 'Invoices' },
     { id: 'bank', label: 'Bank statement' },
     { id: 'reconcile', label: 'Reconcile' }
   ];
-  let tab = 'customers';
+  let tab: TabId = 'customers';
 
-  function answer(result) {
-    $confirmState.resolve(result);
+  function answer(result: boolean) {
+    $confirmState?.resolve(result);
     confirmState.set(null);
   }
 </script>

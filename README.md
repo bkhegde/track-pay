@@ -1,18 +1,18 @@
 # Track-Pay
 
-Desktop app: Svelte UI (AG Grid) in a Python `pywebview` window, business logic in Python, data in SQLite
+Desktop app: Svelte + TypeScript UI (`ui/`) (AG Grid) in a Python `pywebview` window, business logic in Python, data in SQLite
 (`~/.trackpay/trackpay.db`, override with `TRACKPAY_DB`).
 
 ## Run
 ```bash
 pip install -r requirements.txt
-cd frontend && npm install && npm run build && cd ..
+cd ui && npm install && npm run build && cd ..
 python main.py
 ```
 
 ## Develop with hot reload
 ```bash
-cd frontend && npm run dev          # terminal 1
+cd ui && npm run dev          # terminal 1
 TRACKPAY_DEV=1 python main.py       # terminal 2 (PowerShell: $env:TRACKPAY_DEV=1; python main.py)
 ```
 
