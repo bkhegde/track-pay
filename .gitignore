@@ -218,3 +218,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# NPM
+node_modules/
+.svelte-kit/
+build/
+dist/
+.vercel/
+.netlify/
+.wrangler/
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+Thumbs.db
+*.log
+coverage/
+vite.config.*.timestamp-*
