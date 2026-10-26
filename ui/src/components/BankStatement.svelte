@@ -29,13 +29,22 @@
   onMount(load);
   $: view, load();
 
+  // Send raw bytes so Python can read binary .xls as well as CSV text.
+  function toBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',', 2)[1] ?? '');
+      reader.onerror = () => reject(reader.error ?? new Error('Could not read the file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
   async function onFile(e: Event) {
     const file = (e.currentTarget as HTMLInputElement).files?.[0];
     if (!file) return;
     busy = true;
     try {
-      const text = await file.text();
-      lastImport = await call('import_bank_statement', file.name, text);
+      lastImport = await call('import_bank_statement', file.name, await toBase64(file));
       notify(`${lastImport.inserted} new entries imported, ${lastImport.duplicates} already present`, 'success');
       await load();
     } catch (err) {
@@ -49,9 +58,9 @@
 
 <div class="view">
   <div class="toolbar">
-    <input bind:this={fileInput} type="file" accept=".csv,.txt" on:change={onFile} hidden />
+    <input bind:this={fileInput} type="file" accept=".csv,.txt,.xls" on:change={onFile} hidden />
     <button class="btn primary" disabled={busy} on:click={() => fileInput.click()}>
-      {busy ? 'Importing…' : 'Upload statement (CSV)'}
+      {busy ? 'Importing…' : 'Upload statement (CSV / XLS)'}
     </button>
     <select bind:value={view}>
       <option value="ALL">All entries</option>

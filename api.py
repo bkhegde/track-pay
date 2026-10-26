@@ -3,13 +3,15 @@
 Every public method returns {"data": ...} or {"error": "message"}.
 Internal state is underscore-prefixed so pywebview does not expose it to JavaScript.
 """
+import base64
+import binascii
 import functools
 import re
 import sqlite3
 import traceback
 from datetime import datetime
 
-from bank_parser import parse_statement
+from bank_parser import parse_statement_file
 from db import Database
 
 MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -254,8 +256,12 @@ class Api:
 
     # ------------------------------------------------------------------ bank statement
     @safe
-    def import_bank_statement(self, filename, content):
-        entries = parse_statement(content)
+    def import_bank_statement(self, filename, content_b64):
+        try:
+            data = base64.b64decode(content_b64 or "", validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("The uploaded file could not be decoded")
+        entries = parse_statement_file(data)
         inserted = 0
         with self._db.tx() as c:
             for e in entries:

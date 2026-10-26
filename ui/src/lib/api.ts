@@ -16,7 +16,7 @@ export interface Api {
   mark_paid(ids: number[], paidAmount: number | null, paidDate: string | null): Updated;
   update_payment(invoiceId: number, paidAmount: number | null, paidDate: string | null): true;
   mark_unpaid(ids: number[]): Updated;
-  import_bank_statement(filename: string, content: string): ImportResult;
+  import_bank_statement(filename: string, contentBase64: string): ImportResult;
   list_bank_entries(view: BankView): BankEntry[];
   auto_reconcile(month: string | null): ReconcileResult;
   manual_match(invoiceId: number, bankEntryId: number): unknown;
