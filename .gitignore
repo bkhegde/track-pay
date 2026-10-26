@@ -240,3 +240,5 @@ Thumbs.db
 *.log
 coverage/
 vite.config.*.timestamp-*
+# Local DB backups
+backups/

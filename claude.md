@@ -28,7 +28,7 @@ Hot reload: run `npm run dev` in `ui/` (Vite on fixed port 5173), then start Pyt
 
 Type-check the UI without building: `cd ui && npm run check`. There is no test suite or Python linter configured.
 
-Database lives at `~/.trackpay/trackpay.db`; set `TRACKPAY_DB=<path>` to use a different file (handy for experiments). The schema is created with `CREATE TABLE IF NOT EXISTS` on startup — there are no migrations, so schema changes to existing tables need manual handling.
+Database lives at `data/trackpay.db` (a legacy `~/.trackpay/trackpay.db` is copied there once on first run); set `TRACKPAY_DB=<path>` to use a different file (handy for experiments). `Database` takes a weekly snapshot (sqlite backup API) into `backups/` on startup (plus a Backup button in the top bar), keeping the newest 12; set `TRACKPAY_BACKUP_DIR=<path>` to put them elsewhere (e.g. another drive). The schema is created with `CREATE TABLE IF NOT EXISTS` on startup — there are no migrations, so schema changes to existing tables need manual handling.
 
 ## Architecture
 

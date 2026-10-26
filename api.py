@@ -254,6 +254,11 @@ class Api:
                 self._mark_unpaid(c, i)
         return {"updated": len(ids)}
 
+    # ------------------------------------------------------------------ backup
+    @safe
+    def backup_database(self):
+        return {"path": str(self._db.backup_now())}
+
     # ------------------------------------------------------------------ bank statement
     @safe
     def import_bank_statement(self, filename, content_b64):

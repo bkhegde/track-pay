@@ -106,3 +106,4 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 .toast.success { background: var(--paid); }
 
 .empty { padding: 30px; text-align: center; color: var(--muted); }
+.topbar .backup { margin-left: auto; }

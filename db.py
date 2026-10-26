@@ -1,8 +1,15 @@
 """SQLite persistence for Track-Pay."""
 import os
+import shutil
 import sqlite3
+import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
+
+BASE = Path(__file__).resolve().parent
+BACKUP_INTERVAL_DAYS = 7
+BACKUP_KEEP = 12          # weekly backups retained (~3 months)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (
@@ -57,9 +64,18 @@ def default_db_path() -> Path:
     override = os.environ.get("TRACKPAY_DB")
     if override:
         return Path(override)
-    folder = Path.home() / ".trackpay"
+    folder = BASE / "data"
     folder.mkdir(parents=True, exist_ok=True)
-    return folder / "trackpay.db"
+    path = folder / "trackpay.db"
+    legacy = Path.home() / ".trackpay" / "trackpay.db"
+    if not path.exists() and legacy.exists():   # one-time move from the old location
+        shutil.copy2(legacy, path)
+    return path
+
+
+def default_backup_dir() -> Path:
+    override = os.environ.get("TRACKPAY_BACKUP_DIR")
+    return Path(override) if override else BASE / "backups"
 
 
 class Database:
@@ -67,8 +83,41 @@ class Database:
 
     def __init__(self, path=None):
         self.path = str(path or default_db_path())
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.tx() as conn:
             conn.executescript(SCHEMA)
+        self.backup_dir = default_backup_dir()
+        self.backup_if_due()
+
+    # ---- backups -------------------------------------------------------------------
+    def backup_now(self):
+        """Snapshot the database into the backup folder; returns the new file's path."""
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(self.path).stem
+        target = self.backup_dir / f"{stem}-{datetime.now():%Y-%m-%d_%H%M%S}.db"
+        src = sqlite3.connect(self.path)
+        try:
+            dst = sqlite3.connect(target)
+            try:
+                src.backup(dst)   # consistent snapshot even while the DB is in use
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        for old in sorted(self.backup_dir.glob(f"{stem}-*.db"))[:-BACKUP_KEEP]:
+            old.unlink(missing_ok=True)
+        return target
+
+    def backup_if_due(self):
+        """Weekly automatic backup at startup. Never raises."""
+        try:
+            self.backup_dir.mkdir(parents=True, exist_ok=True)
+            existing = sorted(self.backup_dir.glob(f"{Path(self.path).stem}-*.db"))
+            if existing and time.time() - existing[-1].stat().st_mtime < BACKUP_INTERVAL_DAYS * 86400:
+                return
+            self.backup_now()
+        except Exception as e:  # a failed backup must never stop the app
+            print(f"Backup failed: {e}")
 
     @contextmanager
     def tx(self):

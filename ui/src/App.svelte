@@ -3,7 +3,8 @@
   import Invoices from './components/Invoices.svelte';
   import BankStatement from './components/BankStatement.svelte';
   import Reconcile from './components/Reconcile.svelte';
-  import { toasts, confirmState } from './lib/ui';
+  import { call } from './lib/api';
+  import { toasts, confirmState, notify } from './lib/ui';
 
   type TabId = 'customers' | 'invoices' | 'bank' | 'reconcile';
 
@@ -14,6 +15,19 @@
     { id: 'reconcile', label: 'Reconcile' }
   ];
   let tab: TabId = 'customers';
+
+  let backingUp = false;
+  async function backup() {
+    backingUp = true;
+    try {
+      const { path } = await call('backup_database');
+      notify(`Backup saved: ${path}`, 'success', 8000);
+    } catch (e) {
+      notify((e as Error).message, 'error', 8000);
+    } finally {
+      backingUp = false;
+    }
+  }
 
   function answer(result: boolean) {
     $confirmState?.resolve(result);
@@ -29,6 +43,7 @@
         <button class="tab" class:active={tab === t.id} on:click={() => (tab = t.id)}>{t.label}</button>
       {/each}
     </nav>
+    <button class="btn backup" disabled={backingUp} on:click={backup}>{backingUp ? 'Backing up…' : 'Backup'}</button>
   </header>
 
   <main>
