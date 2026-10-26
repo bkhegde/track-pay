@@ -7,7 +7,8 @@ import webview
 
 from api import Api
 
-BASE = Path(__file__).resolve().parent
+# PyInstaller unpacks bundled data under sys._MEIPASS
+BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
 
 def main():

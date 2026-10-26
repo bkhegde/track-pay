@@ -1,13 +1,15 @@
 """SQLite persistence for Track-Pay."""
 import os
 import shutil
+import sys
 import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+# Next to the .exe when packaged with PyInstaller, otherwise next to the source.
+BASE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 BACKUP_INTERVAL_DAYS = 7
 BACKUP_KEEP = 12          # weekly backups retained (~3 months)
 
