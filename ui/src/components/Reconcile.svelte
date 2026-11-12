@@ -90,7 +90,7 @@
         <span><b>{result.matched}</b> matched</span>
         <span><b>{result.no_invoice}</b> UPI found, no invoice of that amount</span>
         <span><b>{result.ambiguous}</b> ambiguous</span>
-        <span><b>{result.no_upi_match}</b> no customer UPI id</span>
+        <span><b>{result.no_match}</b> no customer name + UPI match</span>
       </div>
       {#if result.details.length}<ul>{#each result.details as d}<li>{d}</li>{/each}</ul>{/if}
     </div>

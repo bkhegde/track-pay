@@ -50,7 +50,7 @@ export interface ImportResult {
 
 export interface ReconcileResult {
   matched: number;
-  no_upi_match: number;
+  no_match: number;
   ambiguous: number;
   no_invoice: number;
   details: string[];

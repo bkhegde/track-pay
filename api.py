@@ -9,7 +9,9 @@ import functools
 import re
 import sqlite3
 import traceback
+import webbrowser
 from datetime import datetime
+from urllib.parse import quote
 
 from bank_parser import parse_statement_file
 from db import Database
@@ -70,6 +72,10 @@ def _ids(ids):
 
 def _marks(n):
     return ",".join("?" * n)
+
+
+def _name_words(name):
+    return re.findall(r"[a-z0-9]+", (name or "").lower())
 
 
 def _parse_upis(value):
@@ -254,6 +260,20 @@ class Api:
                 self._mark_unpaid(c, i)
         return {"updated": len(ids)}
 
+    # ------------------------------------------------------------------ reminders
+    @safe
+    def open_whatsapp(self, phone, message):
+        """Open a WhatsApp chat with `message` prefilled (click-to-chat); the user presses Send."""
+        digits = re.sub(r"\D", "", phone or "")
+        if len(digits) == 11 and digits.startswith("0"):
+            digits = digits[1:]
+        if len(digits) == 10:
+            digits = "91" + digits  # bare Indian mobile number
+        if not 11 <= len(digits) <= 15:
+            raise ValueError("Phone number is missing or invalid")
+        webbrowser.open(f"https://wa.me/{digits}?text={quote(message or '')}")
+        return True
+
     # ------------------------------------------------------------------ backup
     @safe
     def backup_database(self):
@@ -309,31 +329,45 @@ class Api:
 
     @safe
     def auto_reconcile(self, month=None):
-        """Match credit entries to unpaid invoices: UPI id found in the narration + exact amount."""
+        """Match credit entries to unpaid invoices: customer name AND UPI id (last 4 chars before '@' + handle) found in the narration; if the narration has no name, the UPI id alone is used. The credit must be >= the invoice amount."""
         month = _month(month) if month and month != "ALL" else None
-        result = {"matched": 0, "no_upi_match": 0, "ambiguous": 0, "no_invoice": 0, "details": []}
+        result = {"matched": 0, "no_match": 0, "ambiguous": 0, "no_invoice": 0, "details": []}
         with self._db.tx() as c:
             names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM customers")}
-            patterns = [
-                (re.compile(r"(?<![a-z0-9._])" + re.escape(r["upi_id"]) + r"(?![a-z0-9])"),
-                 r["customer_id"])
-                for r in c.execute("SELECT upi_id, customer_id FROM customer_upi")
-            ]
+            upis = {}
+            for r in c.execute("SELECT upi_id, customer_id FROM customer_upi"):
+                local, _, handle = r["upi_id"].partition("@")
+                # the statement shows only the last four characters before '@', then the full handle
+                upis.setdefault(r["customer_id"], []).append(
+                    re.compile(re.escape(local[-4:] + "@" + handle) + r"(?![a-z0-9])"))
+            patterns = []
+            for cid, name in names.items():
+                words = _name_words(name)
+                if words and cid in upis:
+                    patterns.append((re.compile(r"(?<![a-z0-9])" + r"[^a-z0-9]+".join(map(re.escape, words))
+                                                + r"(?![a-z0-9])"), upis[cid], cid, len(words)))
             entries = c.execute(
                 """SELECT * FROM bank_entries WHERE credit > 0 AND matched_invoice_id IS NULL
                    ORDER BY txn_date, id""").fetchall()
             for e in entries:
                 desc = (e["description"] or "").lower()
-                owners = {cid for pat, cid in patterns if pat.search(desc)}
+                hits = [(cid, n) for pat, upi_pats, cid, n in patterns
+                        if pat.search(desc) and any(u.search(desc) for u in upi_pats)]
+                # "Ravi" also appears in "Ravi Kumar": only the most specific (longest) names count
+                best = max((n for _, n in hits), default=0)
+                owners = {cid for cid, n in hits if n == best}
                 if not owners:
-                    result["no_upi_match"] += 1
+                    # no name in the narration: fall back to the UPI id alone (it repeats on every payment)
+                    owners = {cid for cid, upi_pats in upis.items() if any(u.search(desc) for u in upi_pats)}
+                if not owners:
+                    result["no_match"] += 1
                     continue
                 if len(owners) > 1:
                     result["ambiguous"] += 1
                     continue
                 cid = owners.pop()
                 sql = ("SELECT id, month FROM invoices WHERE customer_id=? AND status='UNPAID' "
-                       "AND ABS(amount - ?) < 0.005")
+                       "AND amount <= ? + 0.005")
                 params = [cid, e["credit"]]
                 if month:
                     sql += " AND month=?"
@@ -342,7 +376,7 @@ class Api:
                 if not inv:
                     result["no_invoice"] += 1
                     result["details"].append(
-                        f"{e['txn_date']}: {e['credit']:.2f} from {names[cid]} has no unpaid invoice of that amount")
+                        f"{e['txn_date']}: {e['credit']:.2f} from {names[cid]} has no unpaid invoice up to that amount")
                     continue
                 self._link(c, inv["id"], e)
                 result["matched"] += 1

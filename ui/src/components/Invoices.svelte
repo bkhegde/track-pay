@@ -103,6 +103,40 @@
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
+  const DEFAULT_TEMPLATE =
+    'Hi {name}, this is a gentle reminder that your fee of {amount} for {month} is pending. Kindly pay at your earliest convenience. Thank you!';
+  let showRemind = false;
+  let template = DEFAULT_TEMPLATE;
+  let opened = new Set<number>();
+
+  $: unpaidSelected = selected.filter((r) => r.status === 'UNPAID');
+
+  function openRemind() {
+    try { template = localStorage.getItem('reminderTemplate') || DEFAULT_TEMPLATE; } catch { /* storage unavailable */ }
+    opened = new Set();
+    showRemind = true;
+  }
+
+  function monthLabel(m: string) {
+    return new Date(`${m}-01T00:00:00`).toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+  }
+
+  function render(r: Invoice, t: string) {
+    return t.replaceAll('{name}', r.customer_name).replaceAll('{amount}', inr(r.amount))
+      .replaceAll('{month}', monthLabel(r.month));
+  }
+
+  async function remind(r: Invoice) {
+    try {
+      await call('open_whatsapp', r.phone ?? '', render(r, template));
+      opened = new Set(opened).add(r.id);
+    } catch (e) { notify((e as Error).message, 'error'); }
+  }
+
+  function saveTemplate() {
+    try { localStorage.setItem('reminderTemplate', template); } catch { /* storage unavailable */ }
+  }
+
   async function markUnpaid() {
     if (!(await ask(`Mark ${ids.length} invoice(s) as unpaid? Linked bank entries are released.`, 'Mark unpaid'))) return;
     try {
@@ -129,6 +163,7 @@
     <span class="sep"></span>
     <button class="btn" disabled={!ids.length} on:click={openPay}>Mark selected as paid</button>
     <button class="btn" disabled={!ids.length} on:click={markUnpaid}>Mark selected as unpaid</button>
+    <button class="btn" disabled={!unpaidSelected.length} on:click={openRemind}>WhatsApp reminder</button>
     <span class="spacer"></span>
     <span class="count">{ids.length} of {rows.length} selected</span>
   </div>
@@ -138,6 +173,33 @@
           on:selection={(e) => (selected = e.detail)} on:cellchange={onCellChange} />
   </div>
 </div>
+
+{#if showRemind}
+  <div class="backdrop">
+    <div class="modal" role="dialog" aria-modal="true" style="min-width:560px">
+      <h3>WhatsApp reminder · {unpaidSelected.length} unpaid invoice(s)</h3>
+      <label class="row">
+        <span>Message</span>
+        <textarea rows="4" bind:value={template} on:change={saveTemplate}></textarea>
+        <span class="hint">Placeholders: {'{name}'}, {'{amount}'}, {'{month}'}. Each button opens WhatsApp with the message ready; press Send there.</span>
+      </label>
+      <div style="max-height:280px;overflow:auto">
+        {#each unpaidSelected as r (r.id)}
+          <div class="toolbar">
+            <span>{r.customer_name} · {inr(r.amount)} · {r.phone || 'no phone'}</span>
+            <span class="spacer"></span>
+            <button class="btn" disabled={!r.phone} on:click={() => remind(r)}>
+              {opened.has(r.id) ? 'Opened ✓ – open again' : 'Open WhatsApp'}
+            </button>
+          </div>
+        {/each}
+      </div>
+      <div class="actions">
+        <button class="btn" on:click={() => (showRemind = false)}>Close</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if showPay}
   <div class="backdrop">
