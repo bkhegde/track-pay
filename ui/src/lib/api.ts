@@ -16,7 +16,8 @@ export interface Api {
   mark_paid(ids: number[], paidAmount: number | null, paidDate: string | null): Updated;
   update_payment(invoiceId: number, paidAmount: number | null, paidDate: string | null): true;
   mark_unpaid(ids: number[]): Updated;
-  backup_database(): { path: string };
+  open_whatsapp(phone: string, message: string): true;
+  backup_database():{ path: string };
   import_bank_statement(filename: string, contentBase64: string): ImportResult;
   list_bank_entries(view: BankView): BankEntry[];
   auto_reconcile(month: string | null): ReconcileResult;

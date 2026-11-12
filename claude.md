@@ -19,7 +19,7 @@ Use a good-quality HTML grid for viewing and editing data (AG Grid Community is 
 ## Commands
 
 ```bash
-pip install -r requirements.txt                     # only dependency: pywebview
+pip install -r requirements.txt                     # pywebview, xlrd (for .xls statements)
 cd ui && npm install && npm run build && cd ..      # build runs svelte-check, then vite build -> ui/dist
 python main.py                                      # launch desktop app (loads ui/dist/index.html)
 ```
@@ -37,7 +37,7 @@ Desktop app: a `pywebview` window (`main.py`) hosts a Svelte 5 + TypeScript UI, 
 **Python side**
 - `api.py` — all business logic. Every public method of `Api` is callable from JS, so helpers/state must be underscore-prefixed (or module-level) to stay hidden. Public methods are wrapped in `@safe`, which returns `{"data": ...}` or `{"error": msg}`; raise `ValueError` for user-facing validation messages.
 - `db.py` — schema + `Database.tx()` context manager. A new SQLite connection is opened per call because pywebview invokes the API from worker threads; always do DB work inside `with self._db.tx() as c:`.
-- `bank_parser.py` — CSV statement parser. Auto-detects delimiter and the header row (lines above it are ignored), maps Date / Narration / Debit / Credit / optional Ref & Balance columns, and falls back to extracting a 12-digit UPI ref from the narration.
+- `bank_parser.py` — statement parser for CSV/text and legacy `.xls` (via `xlrd`, imported lazily). `parse_statement_file(bytes)` sniffs the format from magic bytes (`.xlsx` is rejected with a message; text is decoded utf-8-sig → cp1252 → latin-1), and for `.xls` uses the first sheet with a recognisable header. Both paths share header detection (lines above it are ignored) and `_parse_rows`, mapping Date / Narration / Debit / Credit / optional Ref & Balance columns and falling back to extracting a 12-digit UPI ref from the narration. The UI sends the uploaded file base64-encoded to `import_bank_statement(filename, content_b64)` so binary files survive the bridge.
 
 **UI side (`ui/src`)**
 - `lib/api.ts` — typed `call(method, ...args)` wrapper; unwraps `{data}` and throws on `{error}`. The `Api` interface there mirrors the Python method signatures, so **adding/changing a Python API method requires updating this interface** (and `lib/types.ts` for row shapes).
@@ -52,5 +52,5 @@ Desktop app: a `pywebview` window (`main.py`) hosts a Svelte 5 + TypeScript UI, 
 - Bank entries: idempotency via `entry_hash` (sha256 of date/description/amounts/balance/ref plus an occurrence counter so identical rows within one file stay distinct). Re-uploading a file is safe.
 - UPI ids are stored lower-case and globally unique (`customer_upi.upi_id`).
 - Invoice ↔ bank entry link is stored on both sides (`invoices.bank_entry_id` and `bank_entries.matched_invoice_id`); `_link` sets both and `_mark_unpaid` clears both — keep them in sync.
-- Auto reconcile: an unmatched credit matches when exactly one customer's UPI id appears in the narration (word-boundary regex) and that customer has an UNPAID invoice of the exact amount; oldest month wins. Multiple owners → counted as ambiguous, skipped.
+- Auto reconcile: an unmatched credit matches when exactly one customer is found in the narration by BOTH name (all name words, in order, whole words) AND UPI id (statements show only the last 4 chars before `@` plus the full handle, e.g. `1234@okaxis`), and that customer has an UNPAID invoice of the exact amount; oldest month wins. If one matching name contains another (Ravi / Ravi Kumar) only the longest counts. Multiple owners → counted as ambiguous, skipped. Customers with no UPI id are never auto-matched.
 - Customers with invoices cannot be deleted: `delete_customers` skips them and returns their names. They have to be deactivated instead.
