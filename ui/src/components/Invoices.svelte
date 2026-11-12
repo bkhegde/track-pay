@@ -4,7 +4,7 @@
   import Grid from './Grid.svelte';
   import { call } from '../lib/api';
   import { notify, ask, inr, currentMonth } from '../lib/ui';
-  import type { Invoice } from '../lib/types';
+  import type { Customer, Invoice } from '../lib/types';
 
   let month = currentMonth();
   let unpaidOnly = false;
@@ -13,12 +13,14 @@
   let search = '';
   let bulkAmount: number | null = null; // number inputs bind to null when empty
   let showPay = false;
-  let pay: { amount: number | null; date: string } = { amount: null, date: '' };
+  let customers: Customer[] = [];
+  let pay: { customerId: number | null; invoiceId: number | null; amount: number | null; date: string; note: string } =
+    { customerId: null, invoiceId: null, amount: null, date: '', note: '' };
 
   $: ids = selected.map((r) => r.id);
   $: totals = {
-    due: rows.filter((r) => r.status === 'UNPAID').reduce((s, r) => s + r.amount, 0),
-    paid: rows.filter((r) => r.status === 'PAID').reduce((s, r) => s + (r.paid_amount ?? 0), 0)
+    due: rows.reduce((s, r) => s + r.balance, 0),
+    paid: rows.reduce((s, r) => s + (r.paid_amount ?? 0), 0)
   };
 
   const columns: ColDef<Invoice>[] = [
@@ -27,26 +29,20 @@
     { field: 'month', headerName: 'Month', width: 105 },
     {
       field: 'amount', headerName: 'Invoice amount', width: 150, type: 'rightAligned',
-      editable: (p) => p.data?.status === 'UNPAID',
+      editable: (p) => p.data?.status !== 'PAID',
       cellEditor: 'agNumberCellEditor', cellEditorParams: { min: 0 },
       valueFormatter: (p) => inr(p.value), valueParser: (p) => Number(p.newValue)
     },
     {
       field: 'status', headerName: 'Status', width: 110,
-      cellRenderer: (p: ICellRendererParams<Invoice, Invoice['status']>) => `<span class="badge ${p.value === 'PAID' ? 'paid' : 'unpaid'}">${p.value === 'PAID' ? 'Paid' : 'Unpaid'}</span>`
+      cellRenderer: (p: ICellRendererParams<Invoice, Invoice['status']>) =>
+        `<span class="badge ${(p.value ?? 'UNPAID').toLowerCase()}">${p.value === 'PAID' ? 'Paid' : p.value === 'PARTIAL' ? 'Partial' : 'Unpaid'}</span>`
     },
-    {
-      field: 'paid_amount', headerName: 'Paid amount', width: 140, type: 'rightAligned', editable: true,
-      cellEditor: 'agNumberCellEditor', cellEditorParams: { min: 0 },
-      valueFormatter: (p) => inr(p.value),
-      valueParser: (p) => (p.newValue === '' || p.newValue == null ? null : Number(p.newValue))
-    },
-    {
-      field: 'paid_date', headerName: 'Paid on', width: 140, editable: true,
-      cellDataType: 'dateString'
-    },
+    { field: 'paid_amount', headerName: 'Paid amount', width: 130, type: 'rightAligned', valueFormatter: (p) => inr(p.value) },
+    { field: 'balance', headerName: 'Balance', width: 120, type: 'rightAligned', valueFormatter: (p) => inr(p.value) },
+    { field: 'paid_date', headerName: 'Last paid on', width: 125 },
     { field: 'txn_id', headerName: 'Transaction id', width: 170 },
-    { field: 'paid_via', headerName: 'Paid via', width: 100 }
+    { field: 'paid_via', headerName: 'Paid via', width: 110 }
   ];
 
   async function load() {
@@ -70,7 +66,6 @@
     try {
       if (!data) return;
       if (colDef.field === 'amount') await call('update_invoice_amounts', [data.id], data.amount);
-      else await call('update_payment', data.id, data.paid_amount ?? null, data.paid_date || null);
     } catch (err) { notify((err as Error).message, 'error'); }
     await load();
   }
@@ -78,13 +73,13 @@
   async function applyToSelected() {
     try {
       const r = await call('update_invoice_amounts', ids, bulkAmount);
-      notify(`${r.updated} unpaid invoice(s) updated (paid invoices are left unchanged)`, 'success');
+      notify(`${r.updated} invoice(s) updated (fully paid invoices are left unchanged)`, 'success');
       await load();
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
   async function applyToMonth() {
-    if (!(await ask(`Set every unpaid invoice of ${month} to ${inr(bulkAmount)}?`, 'Update all'))) return;
+    if (!(await ask(`Set every invoice of ${month} that is not fully paid to ${inr(bulkAmount)}?`, 'Update all'))) return;
     try {
       const r = await call('update_month_amounts', month, bulkAmount);
       notify(`${r.updated} invoice(s) updated`, 'success');
@@ -92,13 +87,28 @@
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
-  function openPay() { pay = { amount: null, date: '' }; showPay = true; }
+  // Cash payment: posted to the customer's account. It settles the selected invoice first (when exactly
+  // one is selected), then the oldest outstanding invoices.
+  async function openPay() {
+    try { customers = await call('list_customers'); } catch (e) { notify((e as Error).message, 'error'); return; }
+    const owing = selected.filter((r) => r.balance > 0);
+    const first = owing[0] ?? selected[0];
+    const mine = first ? owing.filter((r) => r.customer_id === first.customer_id) : [];
+    pay = {
+      customerId: first?.customer_id ?? null,
+      invoiceId: selected.length === 1 && first.balance > 0 ? first.id : null,
+      amount: mine.length ? mine.reduce((s, r) => s + r.balance, 0) : null,
+      date: '', note: ''
+    };
+    showPay = true;
+  }
 
-  async function markPaid() {
+  async function recordCash() {
     try {
-      const r = await call('mark_paid', ids, pay.amount ?? null, pay.date || null);
+      if (pay.customerId == null) throw new Error('Choose a customer');
+      await call('add_cash_payment', pay.customerId, pay.amount as number, pay.date || null, pay.note || null, pay.invoiceId);
       showPay = false;
-      notify(`${r.updated} invoice(s) marked as paid`, 'success');
+      notify(`Cash payment of ${inr(pay.amount)} recorded`, 'success');
       await load();
     } catch (e) { notify((e as Error).message, 'error'); }
   }
@@ -109,7 +119,7 @@
   let template = DEFAULT_TEMPLATE;
   let opened = new Set<number>();
 
-  $: unpaidSelected = selected.filter((r) => r.status === 'UNPAID');
+  $: unpaidSelected = selected.filter((r) => r.status !== 'PAID');
 
   function openRemind() {
     try { template = localStorage.getItem('reminderTemplate') || DEFAULT_TEMPLATE; } catch { /* storage unavailable */ }
@@ -121,8 +131,9 @@
     return new Date(`${m}-01T00:00:00`).toLocaleString('en-IN', { month: 'long', year: 'numeric' });
   }
 
+  // {amount} is what is still outstanding on the invoice
   function render(r: Invoice, t: string) {
-    return t.replaceAll('{name}', r.customer_name).replaceAll('{amount}', inr(r.amount))
+    return t.replaceAll('{name}', r.customer_name).replaceAll('{amount}', inr(r.balance))
       .replaceAll('{month}', monthLabel(r.month));
   }
 
@@ -135,14 +146,6 @@
 
   function saveTemplate() {
     try { localStorage.setItem('reminderTemplate', template); } catch { /* storage unavailable */ }
-  }
-
-  async function markUnpaid() {
-    if (!(await ask(`Mark ${ids.length} invoice(s) as unpaid? Linked bank entries are released.`, 'Mark unpaid'))) return;
-    try {
-      await call('mark_unpaid', ids);
-      await load();
-    } catch (e) { notify((e as Error).message, 'error'); }
   }
 </script>
 
@@ -161,8 +164,7 @@
     <button class="btn" disabled={!ids.length || bulkAmount == null} on:click={applyToSelected}>Set amount for selected</button>
     <button class="btn" disabled={bulkAmount == null} on:click={applyToMonth}>Set amount for all unpaid in month</button>
     <span class="sep"></span>
-    <button class="btn" disabled={!ids.length} on:click={openPay}>Mark selected as paid</button>
-    <button class="btn" disabled={!ids.length} on:click={markUnpaid}>Mark selected as unpaid</button>
+    <button class="btn" on:click={openPay}>Record cash payment</button>
     <button class="btn" disabled={!unpaidSelected.length} on:click={openRemind}>WhatsApp reminder</button>
     <span class="spacer"></span>
     <span class="count">{ids.length} of {rows.length} selected</span>
@@ -181,12 +183,12 @@
       <label class="row">
         <span>Message</span>
         <textarea rows="4" bind:value={template} on:change={saveTemplate}></textarea>
-        <span class="hint">Placeholders: {'{name}'}, {'{amount}'}, {'{month}'}. Each button opens WhatsApp with the message ready; press Send there.</span>
+        <span class="hint">Placeholders: {'{name}'}, {'{amount}'} (outstanding), {'{month}'}. Each button opens WhatsApp with the message ready; press Send there.</span>
       </label>
       <div style="max-height:280px;overflow:auto">
         {#each unpaidSelected as r (r.id)}
           <div class="toolbar">
-            <span>{r.customer_name} · {inr(r.amount)} · {r.phone || 'no phone'}</span>
+            <span>{r.customer_name} · {inr(r.balance)} · {r.phone || 'no phone'}</span>
             <span class="spacer"></span>
             <button class="btn" disabled={!r.phone} on:click={() => remind(r)}>
               {opened.has(r.id) ? 'Opened ✓ – open again' : 'Open WhatsApp'}
@@ -204,19 +206,34 @@
 {#if showPay}
   <div class="backdrop">
     <div class="modal" role="dialog" aria-modal="true">
-      <h3>Mark {ids.length} invoice(s) as paid</h3>
+      <h3>Record cash payment</h3>
       <label class="row">
-        <span>Paid amount (₹)</span>
-        <input type="number" min="0" step="0.01" bind:value={pay.amount} />
-        <span class="hint">Leave blank to use each invoice's own amount.</span>
+        <span>Customer</span>
+        <select bind:value={pay.customerId} on:change={() => (pay.invoiceId = null)}>
+          <option value={null}>Choose…</option>
+          {#each customers as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
+        </select>
       </label>
       <label class="row">
-        <span>Paid on (optional)</span>
+        <span>Amount (₹)</span>
+        <input type="number" min="0" step="0.01" bind:value={pay.amount} />
+        <span class="hint">
+          {pay.invoiceId
+            ? 'Settles the selected invoice first, then the oldest outstanding ones.'
+            : 'Partial amounts are fine. It settles the oldest outstanding invoices first; any excess stays as an advance.'}
+        </span>
+      </label>
+      <label class="row">
+        <span>Paid on (optional, defaults to today)</span>
         <input type="date" bind:value={pay.date} />
+      </label>
+      <label class="row">
+        <span>Note (optional)</span>
+        <input type="text" bind:value={pay.note} />
       </label>
       <div class="actions">
         <button class="btn" on:click={() => (showPay = false)}>Cancel</button>
-        <button class="btn primary" on:click={markPaid}>Mark as paid</button>
+        <button class="btn primary" on:click={recordCash}>Record payment</button>
       </div>
     </div>
   </div>

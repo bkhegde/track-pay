@@ -58,7 +58,44 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 
 CREATE INDEX IF NOT EXISTS idx_invoices_month  ON invoices(month, status);
-CREATE INDEX IF NOT EXISTS idx_bank_unmatched  ON bank_entries(matched_invoice_id);
+
+-- Journal. amount < 0: invoice posted (debit). amount > 0: payment received (credit).
+-- Paid / partial status of an invoice is derived by allocating payments to invoices, never stored.
+-- Legacy columns invoices.status/paid_*/txn_id/bank_entry_id and bank_entries.matched_invoice_id are
+-- no longer used (kept so existing databases keep working).
+CREATE TABLE IF NOT EXISTS transactions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id    INTEGER NOT NULL REFERENCES customers(id),
+    txn_date       TEXT    NOT NULL,                 -- YYYY-MM-DD
+    kind           TEXT    NOT NULL CHECK (kind IN ('INVOICE','BANK','CASH')),
+    amount         REAL    NOT NULL,
+    invoice_id     INTEGER REFERENCES invoices(id),  -- INVOICE: the invoice billed; payment: optional invoice to settle first
+    bank_entry_id  INTEGER UNIQUE REFERENCES bank_entries(id),  -- BANK payments only
+    txn_ref        TEXT,
+    note           TEXT,
+    created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK ((kind = 'INVOICE' AND amount < 0) OR (kind <> 'INVOICE' AND amount > 0))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_txn_invoice  ON transactions(invoice_id) WHERE kind = 'INVOICE';
+CREATE INDEX IF NOT EXISTS idx_txn_customer        ON transactions(customer_id, txn_date);
+"""
+
+# One-time conversion of databases created before the journal existed: every invoice that has no
+# journal posting yet gets its debit, and legacy paid invoices get their payment credit.
+MIGRATE_LEGACY = """
+INSERT INTO transactions(customer_id, txn_date, kind, amount, invoice_id, note)
+    SELECT customer_id, month || '-01', 'INVOICE', -amount, id, 'Invoice ' || month
+    FROM invoices
+    WHERE amount > 0 AND id NOT IN (SELECT invoice_id FROM transactions WHERE kind = 'INVOICE');
+
+INSERT INTO transactions(customer_id, txn_date, kind, amount, invoice_id, bank_entry_id, txn_ref, note)
+    SELECT i.customer_id, COALESCE(i.paid_date, b.txn_date, i.month || '-01'),
+           CASE WHEN b.id IS NOT NULL THEN 'BANK' ELSE 'CASH' END,
+           COALESCE(i.paid_amount, i.amount), i.id, b.id, i.txn_id,
+           CASE WHEN b.id IS NULL THEN 'Migrated manual payment' END
+    FROM invoices i LEFT JOIN bank_entries b ON b.id = i.bank_entry_id
+    WHERE i.status = 'PAID' AND COALESCE(i.paid_amount, i.amount) > 0
+      AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.invoice_id = i.id AND t.kind <> 'INVOICE');
 """
 
 
@@ -88,6 +125,7 @@ class Database:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.tx() as conn:
             conn.executescript(SCHEMA)
+            conn.executescript(MIGRATE_LEGACY)
         self.backup_dir = default_backup_dir()
         self.backup_if_due()
 

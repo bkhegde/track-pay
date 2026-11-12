@@ -81,6 +81,7 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
 .badge.paid { background: var(--paid-bg); color: var(--paid); }
 .badge.unpaid { background: var(--unpaid-bg); color: var(--unpaid); }
+.badge.partial { background: #e3ecfb; color: #2b59c3; }
 .badge.off { background: #e8ebf0; color: var(--muted); }
 
 .backdrop {

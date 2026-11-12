@@ -8,11 +8,11 @@ Track-Pay tracks monthly fees from customers and reconciles them against bank st
 
 1. Customer CRUD: name, phone, monthly fee, status, one or more Indian UPI ids. Checkbox selection to activate/deactivate individually or in bulk.
 2. Generate one invoice per active customer for a given month (idempotent). Update invoice amounts individually or in bulk for a month.
-3. Mark invoices paid by manually entering paid amount and (optional) date.
+3. Record cash payments (customer, amount, optional date/note). Payments may be partial or cover several invoices.
 4. Upload a bank statement; store entries in a table idempotently.
-5. Auto reconcile bank entries to invoices using the UPI id; on match, set paid amount, payment date and transaction id from the bank entry.
+5. Auto reconcile bank entries to customers using name + UPI id; a match posts the bank credit as a payment.
 6. Side-by-side view of invoices and bank entries for manual matching.
-7. Filter to view/edit only unpaid invoices.
+7. Filter to view/edit only unpaid (outstanding) invoices. A Ledger tab shows the journal.
 
 Use a good-quality HTML grid for viewing and editing data (AG Grid Community is used).
 
@@ -43,7 +43,7 @@ Desktop app: a `pywebview` window (`main.py`) hosts a Svelte 5 + TypeScript UI, 
 - `lib/api.ts` — typed `call(method, ...args)` wrapper; unwraps `{data}` and throws on `{error}`. The `Api` interface there mirrors the Python method signatures, so **adding/changing a Python API method requires updating this interface** (and `lib/types.ts` for row shapes).
 - `components/Grid.svelte` — the single AG Grid wrapper used by every tab (checkbox multi-select, single-click editing, emits `selection` and `cellchange` events). Rows must have a numeric `id` (used as row id).
 - `lib/ui.ts` — toasts (`notify`), in-app confirm dialog (`ask` — use instead of `window.confirm`, which is unreliable in webviews), INR formatting.
-- `App.svelte` switches between tabs: Customers, Invoices, Bank statement, Reconcile (side-by-side manual matching).
+- `App.svelte` switches between tabs: Customers, Invoices, Bank statement, Reconcile (side-by-side manual matching), Ledger (journal postings; remove payments).
 - Components use legacy Svelte syntax (`export let`, `$:`, `createEventDispatcher`), not runes — follow that style.
 
 ## Data invariants
@@ -51,6 +51,8 @@ Desktop app: a `pywebview` window (`main.py`) hosts a Svelte 5 + TypeScript UI, 
 - Invoices: `UNIQUE(customer_id, month)`, month is `YYYY-MM`; generation uses insert-or-ignore so re-running only adds missing invoices.
 - Bank entries: idempotency via `entry_hash` (sha256 of date/description/amounts/balance/ref plus an occurrence counter so identical rows within one file stay distinct). Re-uploading a file is safe.
 - UPI ids are stored lower-case and globally unique (`customer_upi.upi_id`).
-- Invoice ↔ bank entry link is stored on both sides (`invoices.bank_entry_id` and `bank_entries.matched_invoice_id`); `_link` sets both and `_mark_unpaid` clears both — keep them in sync.
-- Auto reconcile: an unmatched credit matches when exactly one customer is found in the narration by BOTH name (all name words, in order, whole words) AND UPI id (statements show only the last 4 chars before `@` plus the full handle, e.g. `1234@okaxis`), and that customer has an UNPAID invoice of the exact amount; oldest month wins. If one matching name contains another (Ravi / Ravi Kumar) only the longest counts. Multiple owners → counted as ambiguous, skipped. Customers with no UPI id are never auto-matched.
-- Customers with invoices cannot be deleted: `delete_customers` skips them and returns their names. They have to be deactivated instead.
+- **Journal (`transactions` table) is the source of truth for money.** Generating an invoice posts a NEGATIVE amount (kind `INVOICE`, one per invoice, kept in step with `invoices.amount`); every payment is a POSITIVE amount (kind `BANK` from a bank-entry match, auto or manual; kind `CASH` from the cash-payment dialog). A CHECK constraint enforces the signs. Never store paid state on invoices.
+- Invoice paid/partial/unpaid status, paid amount, last paid date and transaction ids are **derived** by `Api._allocate`: payments aimed at a specific invoice (`transactions.invoice_id`, set by manual match / cash-for-selected-invoice) settle it first, the rest settles the customer's invoices oldest month first; leftover is an advance. `list_invoices` status `UNPAID` means anything not fully paid (partials included). Only fully paid invoices are locked against amount edits.
+- Each bank entry can back at most one payment (`transactions.bank_entry_id UNIQUE`); "matched" bank entries are those with such a transaction. Unmatching = `delete_payments`. Legacy columns (`invoices.status/paid_*/txn_id/bank_entry_id`, `bank_entries.matched_invoice_id`) are unused; `db.py` `MIGRATE_LEGACY` converts old data into journal postings on startup.
+- Auto reconcile: an unmatched credit is posted when exactly one customer is found in the narration by BOTH name (all name words, in order, whole words) AND UPI id (statements show only the last 4 chars before `@` plus the full handle, e.g. `1234@okaxis`), and that customer has an outstanding invoice (in the chosen month, if given). The amount need NOT equal an invoice (partial / multi-invoice / excess-as-advance all fine). If one matching name contains another (Ravi / Ravi Kumar) only the longest counts. Multiple owners → counted as ambiguous, skipped. A manual match saves the payer's masked UPI id (from the narration) on the customer (`_learn_upi`), so later months auto-match; it never takes an id already owned by someone. Customers with no UPI id are never auto-matched.
+- Customers with invoices or journal postings cannot be deleted: `delete_customers` skips them and returns their names. They have to be deactivated instead.

@@ -3,16 +3,18 @@
   import Invoices from './components/Invoices.svelte';
   import BankStatement from './components/BankStatement.svelte';
   import Reconcile from './components/Reconcile.svelte';
+  import Ledger from './components/Ledger.svelte';
   import { call } from './lib/api';
   import { toasts, confirmState, notify } from './lib/ui';
 
-  type TabId = 'customers' | 'invoices' | 'bank' | 'reconcile';
+  type TabId = 'customers' | 'invoices' | 'bank' | 'reconcile' | 'ledger';
 
   const tabs: { id: TabId; label: string }[] = [
     { id: 'customers', label: 'Customers' },
     { id: 'invoices', label: 'Invoices' },
     { id: 'bank', label: 'Bank statement' },
-    { id: 'reconcile', label: 'Reconcile' }
+    { id: 'reconcile', label: 'Reconcile' },
+    { id: 'ledger', label: 'Ledger' }
   ];
   let tab: TabId = 'customers';
 
@@ -51,6 +53,7 @@
     {#if tab === 'invoices'}<Invoices />{/if}
     {#if tab === 'bank'}<BankStatement />{/if}
     {#if tab === 'reconcile'}<Reconcile />{/if}
+    {#if tab === 'ledger'}<Ledger />{/if}
   </main>
 </div>
 

@@ -11,7 +11,7 @@ export interface Customer {
 
 export type CustomerInput = Omit<Customer, 'id'> & { id: number | null };
 
-export type InvoiceStatus = 'PAID' | 'UNPAID';
+export type InvoiceStatus = 'PAID' | 'PARTIAL' | 'UNPAID';
 
 export interface Invoice {
   id: number;
@@ -21,10 +21,11 @@ export interface Invoice {
   month: string; // YYYY-MM
   amount: number;
   status: InvoiceStatus;
-  paid_amount: number | null;
+  paid_amount: number | null; // allocated from payments in the journal
+  balance: number;            // amount still outstanding
   paid_date: string | null; // YYYY-MM-DD
   txn_id: string | null;
-  paid_via: 'Bank' | 'Manual' | '';
+  paid_via: string; // 'Bank', 'Cash', 'Bank + Cash' or ''
   upi_ids: string;
 }
 
@@ -38,8 +39,24 @@ export interface BankEntry {
   debit: number;
   credit: number;
   balance: number | null;
-  matched_invoice_id: number | null;
+  matched_customer_id: number | null;
   matched_to: string;
+}
+
+export type TxnKind = 'INVOICE' | 'BANK' | 'CASH';
+
+// One journal posting: invoices are negative (debit), payments positive (credit).
+export interface Transaction {
+  id: number;
+  customer_id: number;
+  customer_name: string;
+  txn_date: string; // YYYY-MM-DD
+  kind: TxnKind;
+  amount: number;
+  txn_ref: string | null;
+  invoice_month: string | null;
+  description: string;
+  balance: number; // customer's running balance after this posting (negative = owes)
 }
 
 export interface ImportResult {

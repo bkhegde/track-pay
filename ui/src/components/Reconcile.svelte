@@ -20,7 +20,7 @@
   const invCols: ColDef<Invoice>[] = [
     { field: 'customer_name', headerName: 'Customer', flex: 1.2, minWidth: 130 },
     { field: 'month', headerName: 'Month', width: 100 },
-    { field: 'amount', headerName: 'Amount', width: 115, type: 'rightAligned', valueFormatter: (p) => inr(p.value) },
+    { field: 'balance', headerName: 'Balance due', width: 125, type: 'rightAligned', valueFormatter: (p) => inr(p.value) },
     { field: 'upi_ids', headerName: 'UPI ids', flex: 1.2, minWidth: 140 }
   ];
   const bankCols: ColDef<BankEntry>[] = [
@@ -58,13 +58,15 @@
     }
   }
 
-  $: amountMismatch = !!invSel && !!entrySel && Math.abs(invSel.amount - entrySel.credit) > 0.005;
+  $: amountMismatch = !!invSel && !!entrySel && Math.abs(invSel.balance - entrySel.credit) > 0.005;
 
   async function match() {
     if (!invSel || !entrySel) return;
     try {
-      await call('manual_match', invSel.id, entrySel.id);
-      notify('Payment matched and invoice marked as paid', 'success');
+      const r = await call('manual_match', invSel.id, entrySel.id);
+      notify(r.learned
+        ? `Payment posted. UPI id ${r.learned} saved for ${invSel.customer_name}, so auto reconcile will match it next time`
+        : 'Payment posted to the customer\'s account', 'success', r.learned ? 6000 : 3000);
       await load();
     } catch (e) { notify((e as Error).message, 'error'); }
   }
@@ -81,14 +83,14 @@
     <button class="btn primary" disabled={running} on:click={autoReconcile}>
       {running ? 'Reconciling…' : 'Auto reconcile by UPI id'}
     </button>
-    <span class="muted">Matches credits whose narration contains a customer's UPI id and whose amount equals an unpaid invoice.</span>
+    <span class="muted">Posts credits whose narration has a customer's name and UPI id as payments to that customer (partial or multi-invoice amounts are fine).</span>
   </div>
 
   {#if result}
     <div class="panel">
       <div class="stats">
         <span><b>{result.matched}</b> matched</span>
-        <span><b>{result.no_invoice}</b> UPI found, no invoice of that amount</span>
+        <span><b>{result.no_invoice}</b> customer found, no outstanding invoice</span>
         <span><b>{result.ambiguous}</b> ambiguous</span>
         <span><b>{result.no_match}</b> no customer name + UPI match</span>
       </div>
@@ -124,9 +126,9 @@
   <div class="panel toolbar">
     {#if invSel && entrySel}
       <span>
-        <b>{invSel.customer_name}</b> {invSel.month} ({inr(invSel.amount)}) ⇄ {inr(entrySel.credit)} on {entrySel.txn_date}
+        <b>{invSel.customer_name}</b> {invSel.month} ({inr(invSel.balance)} due) ⇄ {inr(entrySel.credit)} on {entrySel.txn_date}
       </span>
-      {#if amountMismatch}<span style="color:var(--unpaid)">Amounts differ — the invoice will be marked paid with the bank amount.</span>{/if}
+      {#if amountMismatch}<span style="color:var(--unpaid)">Amounts differ — the full bank amount is posted to the customer; this invoice is settled first, then older ones, and any excess stays as an advance.</span>{/if}
     {:else}
       <span class="muted">Select one invoice and one bank credit to match them.</span>
     {/if}

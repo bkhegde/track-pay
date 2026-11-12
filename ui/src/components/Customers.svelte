@@ -12,6 +12,8 @@
   let showForm = false;
   let form: CustomerInput = blank();
 
+  let bulkFee: number | null = null;
+
   $: ids = selected.map((r) => r.id);
 
   const columns: ColDef<Customer>[] = [
@@ -68,6 +70,16 @@
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
+  async function applyFee(all: boolean) {
+    const target = all ? `ALL ${rows.length}` : String(ids.length);
+    if (!(await ask(`Set the monthly fee of ${target} customer(s) to ${inr(bulkFee)}? Only invoices generated from now on use it.`, 'Set fee'))) return;
+    try {
+      const r = await call('set_monthly_fees', all ? [] : ids, bulkFee);
+      notify(`${r.updated} customer(s) updated`, 'success');
+      await load();
+    } catch (e) { notify((e as Error).message, 'error'); }
+  }
+
   async function remove() {
     if (!(await ask(`Delete ${ids.length} selected customer(s)? This cannot be undone.`, 'Delete'))) return;
     try {
@@ -87,6 +99,10 @@
     <button class="btn" disabled={!ids.length} on:click={() => setActive(true)}>Activate selected</button>
     <button class="btn" disabled={!ids.length} on:click={() => setActive(false)}>Deactivate selected</button>
     <button class="btn danger" disabled={!ids.length} on:click={remove}>Delete selected</button>
+    <span class="sep"></span>
+    <input type="number" min="0" step="0.01" placeholder="Monthly fee" style="width:120px" bind:value={bulkFee} />
+    <button class="btn" disabled={!ids.length || bulkFee == null} on:click={() => applyFee(false)}>Set fee for selected</button>
+    <button class="btn" disabled={bulkFee == null} on:click={() => applyFee(true)}>Set fee for all</button>
     <span class="spacer"></span>
     <span class="count">{ids.length} of {rows.length} selected</span>
     <input type="text" placeholder="Search customers" bind:value={search} />

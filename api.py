@@ -17,6 +17,7 @@ from bank_parser import parse_statement_file
 from db import Database
 
 MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+EPS = 0.005   # money tolerance
 UPI_RE = re.compile(r"^[a-z0-9._\-]{2,256}@[a-z][a-z0-9]{1,63}$")
 
 
@@ -152,6 +153,19 @@ class Api:
         return {"updated": cur.rowcount}
 
     @safe
+    def set_monthly_fees(self, ids, fee):
+        """Change the monthly fee of the given customers (all customers when ids is empty).
+        Only invoices generated afterwards use it; existing invoices keep their amount."""
+        fee = _num(fee, "Monthly fee")
+        ids = [int(i) for i in (ids or [])]
+        with self._db.tx() as c:
+            if ids:
+                cur = c.execute(f"UPDATE customers SET monthly_fee=? WHERE id IN ({_marks(len(ids))})", [fee, *ids])
+            else:
+                cur = c.execute("UPDATE customers SET monthly_fee=?", (fee,))
+        return {"updated": cur.rowcount}
+
+    @safe
     def delete_customers(self, ids):
         ids = _ids(ids)
         deleted, skipped = 0, []
@@ -160,30 +174,127 @@ class Api:
                 row = c.execute("SELECT name FROM customers WHERE id=?", (cid,)).fetchone()
                 if not row:
                     continue
-                if c.execute("SELECT 1 FROM invoices WHERE customer_id=? LIMIT 1", (cid,)).fetchone():
+                if (c.execute("SELECT 1 FROM invoices WHERE customer_id=? LIMIT 1", (cid,)).fetchone()
+                        or c.execute("SELECT 1 FROM transactions WHERE customer_id=? LIMIT 1", (cid,)).fetchone()):
                     skipped.append(row["name"])  # keep billing history; deactivate instead
                     continue
                 c.execute("DELETE FROM customers WHERE id=?", (cid,))
                 deleted += 1
         return {"deleted": deleted, "skipped": skipped}
 
+    # ------------------------------------------------------------------ journal helpers
+    @staticmethod
+    def _post_invoice(c, invoice_id, customer_id, month, amount):
+        """Keep the invoice's debit posting (negative amount) in step with the invoice amount."""
+        if amount > EPS:
+            cur = c.execute("UPDATE transactions SET amount=? WHERE invoice_id=? AND kind='INVOICE'",
+                            (-amount, invoice_id))
+            if cur.rowcount == 0:
+                c.execute(
+                    """INSERT INTO transactions(customer_id, txn_date, kind, amount, invoice_id, note)
+                       VALUES (?,?,?,?,?,?)""",
+                    (customer_id, month + "-01", "INVOICE", -amount, invoice_id, f"Invoice {month}"))
+        else:
+            c.execute("DELETE FROM transactions WHERE invoice_id=? AND kind='INVOICE'", (invoice_id,))
+
+    @staticmethod
+    def _post_payment(c, customer_id, date, kind, amount, invoice_id=None, bank_entry_id=None,
+                      ref=None, note=None):
+        """Post a payment (positive amount) to the journal."""
+        return c.execute(
+            """INSERT INTO transactions
+               (customer_id, txn_date, kind, amount, invoice_id, bank_entry_id, txn_ref, note)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (customer_id, date, kind, amount, invoice_id, bank_entry_id, ref, note)).lastrowid
+
+    @staticmethod
+    def _allocate(c, customer_ids=None):
+        """Derive each invoice's paid amount from the journal.
+
+        A payment aimed at a specific invoice settles that invoice first; whatever is left of every
+        payment then settles the customer's invoices oldest month first. Returns
+        (invoices, credit): invoice id -> {customer_id, month, amount, paid, date, refs, kinds} and
+        customer id -> payment not applied to any invoice (advance).
+        """
+        scope, params = "", []
+        if customer_ids is not None:
+            scope, params = f" AND customer_id IN ({_marks(len(customer_ids))})", list(customer_ids)
+        invoices, by_customer = {}, {}
+        for r in c.execute(f"SELECT id, customer_id, month, amount FROM invoices WHERE 1=1{scope} "
+                           "ORDER BY month, id", params):
+            invoices[r["id"]] = {"customer_id": r["customer_id"], "month": r["month"],
+                                 "amount": r["amount"], "paid": 0.0, "date": None, "refs": [], "kinds": set()}
+            by_customer.setdefault(r["customer_id"], [])
+        payments = {}
+        for r in c.execute(
+                f"""SELECT id, customer_id, txn_date, kind, amount, invoice_id, txn_ref
+                    FROM transactions WHERE kind <> 'INVOICE'{scope} ORDER BY txn_date, id""", params):
+            payments.setdefault(r["customer_id"], []).append(
+                {"left": r["amount"], "date": r["txn_date"], "kind": r["kind"],
+                 "invoice_id": r["invoice_id"], "ref": r["txn_ref"]})
+        for iid, inv in invoices.items():
+            by_customer[inv["customer_id"]].append(iid)
+
+        def apply(inv, pay, take):
+            inv["paid"] += take
+            pay["left"] -= take
+            inv["date"] = max(inv["date"] or "", pay["date"])
+            if pay["ref"] and pay["ref"] not in inv["refs"]:
+                inv["refs"].append(pay["ref"])
+            inv["kinds"].add(pay["kind"])
+
+        credit = {}
+        for cid in set(by_customer) | set(payments):
+            pays = payments.get(cid, [])
+            invs = [invoices[i] for i in by_customer.get(cid, [])]
+            for pay in pays:                               # pass 1: payments aimed at an invoice
+                inv = invoices.get(pay["invoice_id"])
+                if inv and inv["customer_id"] == cid:
+                    take = min(pay["left"], inv["amount"] - inv["paid"])
+                    if take > EPS:
+                        apply(inv, pay, take)
+            for inv in invs:                               # pass 2: oldest invoice first
+                for pay in pays:
+                    need = inv["amount"] - inv["paid"]
+                    if need <= EPS:
+                        break
+                    take = min(pay["left"], need)
+                    if take > EPS:
+                        apply(inv, pay, take)
+            credit[cid] = round(sum(p["left"] for p in pays), 2)
+        for inv in invoices.values():
+            inv["paid"] = round(inv["paid"], 2)
+        return invoices, credit
+
+    @staticmethod
+    def _status(amount, paid):
+        if paid > EPS and amount - paid <= EPS:
+            return "PAID"
+        return "PARTIAL" if paid > EPS else "UNPAID"
+
     # ------------------------------------------------------------------ invoices
     @safe
     def generate_invoices(self, month):
+        """Create the month's missing invoices and post each one to the journal as a debit."""
         _month(month)
         with self._db.tx() as c:
             active = c.execute("SELECT COUNT(*) FROM customers WHERE active=1").fetchone()[0]
             cur = c.execute(
                 """INSERT OR IGNORE INTO invoices(customer_id, month, amount)
                    SELECT id, ?, monthly_fee FROM customers WHERE active=1""", (month,))
-        return {"created": cur.rowcount, "existing": active - cur.rowcount}
+            created = cur.rowcount
+            c.execute(
+                """INSERT INTO transactions(customer_id, txn_date, kind, amount, invoice_id, note)
+                   SELECT customer_id, month || '-01', 'INVOICE', -amount, id, 'Invoice ' || month
+                   FROM invoices
+                   WHERE month=? AND amount > 0
+                     AND id NOT IN (SELECT invoice_id FROM transactions WHERE kind='INVOICE')""", (month,))
+        return {"created": created, "existing": active - created}
 
     @safe
     def list_invoices(self, month=None, status="ALL"):
+        """status: ALL, PAID (fully paid) or UNPAID (anything still outstanding, partly paid included)."""
         sql = """SELECT i.id, i.customer_id, c.name AS customer_name, c.phone, i.month, i.amount,
-                        i.status, i.paid_amount, i.paid_date, i.txn_id,
-                        CASE WHEN i.bank_entry_id IS NOT NULL THEN 'Bank'
-                             WHEN i.status='PAID' THEN 'Manual' ELSE '' END AS paid_via,
                         COALESCE((SELECT group_concat(upi_id, ', ')
                                   FROM customer_upi u WHERE u.customer_id = c.id), '') AS upi_ids
                  FROM invoices i JOIN customers c ON c.id = i.customer_id WHERE 1=1"""
@@ -191,74 +302,100 @@ class Api:
         if month and month != "ALL":
             sql += " AND i.month=?"
             params.append(_month(month))
-        if status in ("UNPAID", "PAID"):
-            sql += " AND i.status=?"
-            params.append(status)
         sql += " ORDER BY i.month, c.name COLLATE NOCASE"
         with self._db.tx() as c:
-            return [dict(r) for r in c.execute(sql, params).fetchall()]
+            rows = [dict(r) for r in c.execute(sql, params).fetchall()]
+            alloc, _ = self._allocate(c, {r["customer_id"] for r in rows})
+        out = []
+        for r in rows:
+            a = alloc[r["id"]]
+            r["status"] = self._status(r["amount"], a["paid"])
+            if status == "PAID" and r["status"] != "PAID":
+                continue
+            if status == "UNPAID" and r["status"] == "PAID":
+                continue
+            r["paid_amount"] = a["paid"] or None
+            r["balance"] = round(max(r["amount"] - a["paid"], 0), 2)
+            r["paid_date"] = a["date"]
+            r["txn_id"] = ", ".join(a["refs"])
+            r["paid_via"] = " + ".join(n for k, n in (("BANK", "Bank"), ("CASH", "Cash")) if k in a["kinds"])
+            out.append(r)
+        return out
+
+    def _set_amounts(self, c, where, params, amount):
+        rows = c.execute(f"SELECT id, customer_id, month FROM invoices WHERE {where}", params).fetchall()
+        alloc, _ = self._allocate(c, {r["customer_id"] for r in rows})
+        updated = 0
+        for r in rows:
+            if self._status(alloc[r["id"]]["amount"], alloc[r["id"]]["paid"]) == "PAID":
+                continue   # fully paid invoices are history
+            c.execute("UPDATE invoices SET amount=? WHERE id=?", (amount, r["id"]))
+            self._post_invoice(c, r["id"], r["customer_id"], r["month"], amount)
+            updated += 1
+        return {"updated": updated}
 
     @safe
     def update_invoice_amounts(self, ids, amount):
         ids, amount = _ids(ids), _num(amount, "Amount")
         with self._db.tx() as c:
-            cur = c.execute(
-                f"UPDATE invoices SET amount=? WHERE status='UNPAID' AND id IN ({_marks(len(ids))})",
-                [amount, *ids])
-        return {"updated": cur.rowcount}
+            return self._set_amounts(c, f"id IN ({_marks(len(ids))})", ids, amount)
 
     @safe
     def update_month_amounts(self, month, amount):
         _month(month)
         amount = _num(amount, "Amount")
         with self._db.tx() as c:
-            cur = c.execute("UPDATE invoices SET amount=? WHERE month=? AND status='UNPAID'",
-                            (amount, month))
+            return self._set_amounts(c, "month=?", [month], amount)
+
+    # ------------------------------------------------------------------ payments & ledger
+    @safe
+    def add_cash_payment(self, customer_id, amount, payment_date=None, note=None, invoice_id=None):
+        """Post a cash payment (positive amount) to the customer's account.
+
+        It settles `invoice_id` first when given, then the oldest outstanding invoices."""
+        amount = _num(amount, "Amount")
+        if amount <= 0:
+            raise ValueError("Amount must be greater than zero")
+        date = _date(payment_date) or datetime.now().strftime("%Y-%m-%d")
+        with self._db.tx() as c:
+            if not c.execute("SELECT 1 FROM customers WHERE id=?", (customer_id,)).fetchone():
+                raise ValueError("Customer not found")
+            if invoice_id and not c.execute("SELECT 1 FROM invoices WHERE id=? AND customer_id=?",
+                                            (invoice_id, customer_id)).fetchone():
+                raise ValueError("That invoice does not belong to this customer")
+            tid = self._post_payment(c, customer_id, date, "CASH", amount, invoice_id or None,
+                                     note=(note or "").strip() or None)
+        return {"id": tid}
+
+    @safe
+    def delete_payments(self, ids):
+        """Remove payment postings (cash or bank). A removed bank payment frees its bank entry."""
+        ids = _ids(ids)
+        with self._db.tx() as c:
+            cur = c.execute(f"DELETE FROM transactions WHERE kind <> 'INVOICE' AND id IN ({_marks(len(ids))})", ids)
         return {"updated": cur.rowcount}
 
-    @staticmethod
-    def _mark_paid(c, invoice_id, amount, date):
-        row = c.execute("SELECT amount FROM invoices WHERE id=?", (invoice_id,)).fetchone()
-        if not row:
-            raise ValueError("Invoice not found")
-        paid = amount if amount is not None else row["amount"]
-        c.execute("UPDATE invoices SET status='PAID', paid_amount=?, paid_date=? WHERE id=?",
-                  (paid, date, invoice_id))
-
-    @staticmethod
-    def _mark_unpaid(c, invoice_id):
-        c.execute("UPDATE bank_entries SET matched_invoice_id=NULL WHERE matched_invoice_id=?",
-                  (invoice_id,))
-        c.execute("""UPDATE invoices SET status='UNPAID', paid_amount=NULL, paid_date=NULL,
-                     txn_id=NULL, bank_entry_id=NULL WHERE id=?""", (invoice_id,))
-
     @safe
-    def mark_paid(self, ids, paid_amount=None, paid_date=None):
-        ids = _ids(ids)
-        amount, date = _num(paid_amount, "Paid amount", optional=True), _date(paid_date)
+    def list_transactions(self, customer_id=None):
+        """Journal rows, newest first, with each customer's running balance (negative = owes)."""
         with self._db.tx() as c:
-            for i in ids:
-                self._mark_paid(c, i, amount, date)
-        return {"updated": len(ids)}
-
-    @safe
-    def update_payment(self, invoice_id, paid_amount, paid_date):
-        """Inline grid edit: blank amount and blank date turns the invoice back to unpaid."""
-        amount, date = _num(paid_amount, "Paid amount", optional=True), _date(paid_date)
-        with self._db.tx() as c:
-            if amount is None and date is None:
-                self._mark_unpaid(c, invoice_id)
-            else:
-                self._mark_paid(c, invoice_id, amount, date)
-        return True
-
-    @safe
-    def mark_unpaid(self, ids):
-        ids = _ids(ids)
-        with self._db.tx() as c:
-            for i in ids:
-                self._mark_unpaid(c, i)
-        return {"updated": len(ids)}
+            rows = [dict(r) for r in c.execute(
+                """SELECT t.id, t.customer_id, c.name AS customer_name, t.txn_date, t.kind, t.amount,
+                          t.txn_ref, i.month AS invoice_month,
+                          COALESCE(t.note, b.description, '') AS description
+                   FROM transactions t
+                   JOIN customers c ON c.id = t.customer_id
+                   LEFT JOIN invoices i ON i.id = t.invoice_id
+                   LEFT JOIN bank_entries b ON b.id = t.bank_entry_id
+                   ORDER BY t.txn_date, t.id""").fetchall()]
+        running = {}
+        for r in rows:
+            running[r["customer_id"]] = round(running.get(r["customer_id"], 0) + r["amount"], 2)
+            r["balance"] = running[r["customer_id"]]
+        if customer_id:
+            rows = [r for r in rows if r["customer_id"] == int(customer_id)]
+        rows.reverse()
+        return rows
 
     # ------------------------------------------------------------------ reminders
     @safe
@@ -302,34 +439,53 @@ class Api:
     @safe
     def list_bank_entries(self, view="ALL"):
         where = {
-            "UNMATCHED_CREDITS": "WHERE b.credit > 0 AND b.matched_invoice_id IS NULL",
-            "MATCHED": "WHERE b.matched_invoice_id IS NOT NULL",
+            "UNMATCHED_CREDITS": "WHERE b.credit > 0 AND t.id IS NULL",
+            "MATCHED": "WHERE t.id IS NOT NULL",
         }.get(view, "")
         with self._db.tx() as c:
             rows = c.execute(
                 f"""SELECT b.id, b.txn_date, b.description, b.txn_ref, b.debit, b.credit, b.balance,
-                           b.matched_invoice_id,
-                           CASE WHEN b.matched_invoice_id IS NULL THEN ''
-                                ELSE c.name || ' / ' || i.month END AS matched_to
+                           t.customer_id AS matched_customer_id,
+                           COALESCE(c.name, '') AS matched_to
                     FROM bank_entries b
-                    LEFT JOIN invoices i ON i.id = b.matched_invoice_id
-                    LEFT JOIN customers c ON c.id = i.customer_id
+                    LEFT JOIN transactions t ON t.bank_entry_id = b.id
+                    LEFT JOIN customers c ON c.id = t.customer_id
                     {where} ORDER BY b.txn_date DESC, b.id DESC""").fetchall()
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------ reconciliation
     @staticmethod
-    def _link(c, invoice_id, entry):
-        c.execute(
-            """UPDATE invoices SET status='PAID', paid_amount=?, paid_date=?, txn_id=?, bank_entry_id=?
-               WHERE id=?""",
-            (entry["credit"], entry["txn_date"], entry["txn_ref"] or f"BANK-{entry['id']}",
-             entry["id"], invoice_id))
-        c.execute("UPDATE bank_entries SET matched_invoice_id=? WHERE id=?", (invoice_id, entry["id"]))
+    def _link(c, customer_id, entry, invoice_id=None):
+        """Post a bank credit to the journal as a payment (positive amount) for the customer."""
+        Api._post_payment(c, customer_id, entry["txn_date"], "BANK", entry["credit"], invoice_id,
+                          bank_entry_id=entry["id"], ref=entry["txn_ref"] or f"BANK-{entry['id']}")
+
+    @staticmethod
+    def _learn_upi(c, customer_id, description):
+        """Remember the payer's UPI id from a manually matched narration so later months auto-match.
+
+        The statement shows only the last 4 chars before '@' plus the handle (e.g. ******1729@OKICICI).
+        Returns the id saved, or None if there was none / it is already known."""
+        m = re.search(r"\*([a-z0-9._\-]{2,})@([a-z][a-z0-9]{1,63})(?![a-z0-9])", (description or "").lower())
+        if not m:
+            m = re.search(r"(?<![a-z0-9._\-])([a-z0-9._\-]{2,})@([a-z][a-z0-9]{1,63})(?![a-z0-9])",
+                          (description or "").lower())
+            if not m:
+                return None
+        upi = m.group(1)[-4:] + "@" + m.group(2)
+        if not UPI_RE.match(upi):
+            return None
+        cur = c.execute("INSERT OR IGNORE INTO customer_upi(customer_id, upi_id) VALUES (?,?)", (customer_id, upi))
+        return upi if cur.rowcount else None   # already used (by this or another customer): leave as is
 
     @safe
     def auto_reconcile(self, month=None):
-        """Match credit entries to unpaid invoices: customer name AND UPI id (last 4 chars before '@' + handle) found in the narration; if the narration has no name, the UPI id alone is used. The credit must be >= the invoice amount."""
+        """Post unmatched bank credits as payments to the customer found in the narration.
+
+        The customer is identified by name AND UPI id (last 4 chars before '@' + handle); if the narration
+        has no name, the UPI id alone is used. The customer must have an outstanding invoice (in `month`
+        when given). The amount may be partial, or cover several invoices: payments settle the oldest
+        invoice first, and any excess stays on the account as an advance."""
         month = _month(month) if month and month != "ALL" else None
         result = {"matched": 0, "no_match": 0, "ambiguous": 0, "no_invoice": 0, "details": []}
         with self._db.tx() as c:
@@ -347,7 +503,8 @@ class Api:
                     patterns.append((re.compile(r"(?<![a-z0-9])" + r"[^a-z0-9]+".join(map(re.escape, words))
                                                 + r"(?![a-z0-9])"), upis[cid], cid, len(words)))
             entries = c.execute(
-                """SELECT * FROM bank_entries WHERE credit > 0 AND matched_invoice_id IS NULL
+                """SELECT * FROM bank_entries b WHERE credit > 0
+                   AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.bank_entry_id = b.id)
                    ORDER BY txn_date, id""").fetchall()
             for e in entries:
                 desc = (e["description"] or "").lower()
@@ -366,36 +523,43 @@ class Api:
                     result["ambiguous"] += 1
                     continue
                 cid = owners.pop()
-                sql = ("SELECT id, month FROM invoices WHERE customer_id=? AND status='UNPAID' "
-                       "AND amount <= ? + 0.005")
-                params = [cid, e["credit"]]
-                if month:
-                    sql += " AND month=?"
-                    params.append(month)
-                inv = c.execute(sql + " ORDER BY month LIMIT 1", params).fetchone()
-                if not inv:
+                invoices, _ = self._allocate(c, [cid])   # current state, including payments posted this run
+                owed = [i for i in invoices.values()
+                        if i["amount"] - i["paid"] > EPS and (not month or i["month"] == month)]
+                if not owed:
                     result["no_invoice"] += 1
                     result["details"].append(
-                        f"{e['txn_date']}: {e['credit']:.2f} from {names[cid]} has no unpaid invoice up to that amount")
+                        f"{e['txn_date']}: {e['credit']:.2f} from {names[cid]} has no outstanding invoice"
+                        + (f" for {month}" if month else ""))
                     continue
-                self._link(c, inv["id"], e)
+                outstanding = sum(i["amount"] - i["paid"] for i in owed)
+                self._link(c, cid, e)
                 result["matched"] += 1
+                note = ""
+                if e["credit"] < outstanding - EPS:
+                    note = f" (partial, {outstanding - e['credit']:.2f} still due)"
+                elif e["credit"] > outstanding + EPS:
+                    note = f" (excess {e['credit'] - outstanding:.2f} kept as advance)"
                 result["details"].append(
-                    f"{e['txn_date']}: {e['credit']:.2f} matched to {names[cid]} / {inv['month']}")
+                    f"{e['txn_date']}: {e['credit']:.2f} posted to {names[cid]}{note}")
         return result
 
     @safe
     def manual_match(self, invoice_id, bank_entry_id):
+        """Post a bank credit as a payment for the invoice's customer; the invoice is settled first.
+        The payer's UPI id in the narration is saved on the customer so auto reconcile catches it next time."""
         with self._db.tx() as c:
-            inv = c.execute("SELECT status FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+            inv = c.execute("SELECT customer_id FROM invoices WHERE id=?", (invoice_id,)).fetchone()
             entry = c.execute("SELECT * FROM bank_entries WHERE id=?", (bank_entry_id,)).fetchone()
             if not inv or not entry:
                 raise ValueError("Invoice or bank entry not found")
-            if inv["status"] == "PAID":
-                raise ValueError("This invoice is already paid")
-            if entry["matched_invoice_id"] is not None:
+            if c.execute("SELECT 1 FROM transactions WHERE bank_entry_id=?", (bank_entry_id,)).fetchone():
                 raise ValueError("This bank entry is already matched")
             if entry["credit"] <= 0:
                 raise ValueError("Only credit entries can be matched to an invoice")
-            self._link(c, invoice_id, entry)
-        return True
+            invoices, _ = self._allocate(c, [inv["customer_id"]])
+            if invoices[invoice_id]["amount"] - invoices[invoice_id]["paid"] <= EPS:
+                raise ValueError("This invoice is already paid")
+            self._link(c, inv["customer_id"], entry, invoice_id)
+            learned = self._learn_upi(c, inv["customer_id"], entry["description"])
+        return {"learned": learned}
